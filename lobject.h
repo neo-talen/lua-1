@@ -35,11 +35,11 @@
 ** tags for Tagged Values have the following use of bits:
 ** bits 0-3: actual tag (a LUA_T* constant)
 ** bits 4-5: variant bits
-** bit 6: whether value is collectable
+** bit 6: whether value is collectable  // see also BIT_ISCOLLECTABLE and macro::ctb macro::setgcovalue
 */
 
 /* add variant bits to a type */
-#define makevariant(t,v)	((t) | ((v) << 4))
+#define makevariant(t,v)	((t) | ((v) << 4))  // v stands for variant
 
 
 
@@ -167,13 +167,13 @@ typedef StackValue *StkId;
 */
 
 /* Standard nil */
-#define LUA_VNIL	makevariant(LUA_TNIL, 0)
+#define LUA_VNIL	makevariant(LUA_TNIL, 0)  // nil type's variant is 0
 
 /* Empty slot (which might be different from a slot containing nil) */
-#define LUA_VEMPTY	makevariant(LUA_TNIL, 1)
+#define LUA_VEMPTY	makevariant(LUA_TNIL, 1)  // empty slot's variant is 1
 
 /* Value returned for a key not found in a table (absent key) */
-#define LUA_VABSTKEY	makevariant(LUA_TNIL, 2)
+#define LUA_VABSTKEY	makevariant(LUA_TNIL, 2)  // absent key's variant is 2
 
 
 /* macro to test for (any kind of) nil */

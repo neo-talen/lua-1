@@ -163,9 +163,10 @@ TString *luaS_createlngstrobj (lua_State *L, size_t l) {
 
 void luaS_remove (lua_State *L, TString *ts) {
   stringtable *tb = &G(L)->strt;
-  TString **p = &tb->hash[lmod(ts->hash, tb->size)];
+  TString **p = &tb->hash[lmod(ts->hash, tb->size)];  // *p is the value of the slot
   while (*p != ts)  /* find previous element */
-    p = &(*p)->u.hnext;
+    p = &(*p)->u.hnext;  // & makes *p be the value need to modified directly
+  // currently: *p is the value of the slot(only one element) or the value of previous ts->u.hnext
   *p = (*p)->u.hnext;  /* remove element from its list */
   tb->nuse--;
 }
