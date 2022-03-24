@@ -1,6 +1,10 @@
 
 # GC
 
+## 参考资料
+
+https://blog.codingnow.com/2011/03/lua_gc_1.html  
+
 ## 要点
 1. 
 
@@ -36,11 +40,12 @@
                         GCObject *gclist;
                 } Table;
 
-## ltable.c
+## lgc.c
 
 | 名称 | 功能 | 参数 | tips |
 |:--|:--|:--| :-- |
-
+|getgclist|获取指定对象记录的gclist|GCObject *o|对于对象o的类型,返回其gclist字段<br>如Table，LuaClosure，CClosure，thread，Proto和UData类型的对象，都有gclist字段|
+|linkgclist|把o加到一个gclist中|GCObject *o, GCObject **pnext, GCObject **list||
 
 ---
 
