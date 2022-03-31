@@ -10,7 +10,7 @@ https://blog.codingnow.com/2011/03/lua_gc_1.html
 2. barrier: 在标记阶段新增对象时，可能会和已经标记过得对象（黑色）之间发生引用关系的变化，此时需要处理保证不会出现黑色对象引用到了白色对象的情况，有两种方式：a) 标记过程向前一步，如果新增对象被一个黑色对象引用，则标记新增对象为灰色；b) 标记过程回退一步，将引用了新增对象的黑色对象置灰，置灰会使得下一次标记过程对其进行重新扫描。
 
 3. traversetable: {stron key: weak value}: traverseweakvalue；{weak key: stron value}: traverseephemeron；{weak key: weak value}: linkgclist(table, g->allweak)；{strong key: strong value}: traversestrongtable;
-4. 
+4. Lua 5.4，增量标记-回收法和分代回收法都有。
 
 ## 数据结构
                 #define CommonHeader	struct GCObject *next; lu_byte tt; lu_byte marked
@@ -43,6 +43,93 @@ https://blog.codingnow.com/2011/03/lua_gc_1.html
                         struct Table *metatable;
                         GCObject *gclist;
                 } Table;
+
+## lstate.h
+
+                /*
+                ** Some notes about garbage-collected objects: All objects in Lua must
+                ** be kept somehow accessible until being freed, so all objects always
+                ** belong to one (and only one) of these lists, using field 'next' of
+                ** the 'CommonHeader' for the link:
+                **
+                ** 'allgc': all objects not marked for finalization;
+                ** 'finobj': all objects marked for finalization;
+                ** 'tobefnz': all objects ready to be finalized;
+                ** 'fixedgc': all objects that are not to be collected (currently
+                ** only small strings, such as reserved words).
+                **
+                ** For the generational collector, some of these lists have marks for
+                ** generations. Each mark points to the first element in the list for
+                ** that particular generation; that generation goes until the next mark.
+                **
+                ** 'allgc' -> 'survival': new objects;
+                ** 'survival' -> 'old': objects that survived one collection;
+                ** 'old1' -> 'reallyold': objects that became old in last collection;
+                ** 'reallyold' -> NULL: objects old for more than one cycle.
+                **
+                ** 'finobj' -> 'finobjsur': new objects marked for finalization;
+                ** 'finobjsur' -> 'finobjold1': survived   """";
+                ** 'finobjold1' -> 'finobjrold': just old  """";
+                ** 'finobjrold' -> NULL: really old       """".
+                **
+                ** All lists can contain elements older than their main ages, due
+                ** to 'luaC_checkfinalizer' and 'udata2finalize', which move
+                ** objects between the normal lists and the "marked for finalization"
+                ** lists. Moreover, barriers can age young objects in young lists as
+                ** OLD0, which then become OLD1. However, a list never contains
+                ** elements younger than their main ages.
+                **
+                ** The generational collector also uses a pointer 'firstold1', which
+                ** points to the first OLD1 object in the list. It is used to optimize
+                ** 'markold'. (Potentially OLD1 objects can be anywhere between 'allgc'
+                ** and 'reallyold', but often the list has no OLD1 objects or they are
+                ** after 'old1'.) Note the difference between it and 'old1':
+                ** 'firstold1': no OLD1 objects before this point; there can be all
+                **   ages after it.
+                ** 'old1': no objects younger than OLD1 after this point.
+                */
+
+                /*
+                ** Moreover, there is another set of lists that control gray objects.
+                ** These lists are linked by fields 'gclist'. (All objects that
+                ** can become gray have such a field. The field is not the same
+                ** in all objects, but it always has this name.)  Any gray object
+                ** must belong to one of these lists, and all objects in these lists
+                ** must be gray (with two exceptions explained below):
+                **
+                ** 'gray': regular gray objects, still waiting to be visited.
+                ** 'grayagain': objects that must be revisited at the atomic phase.
+                **   That includes
+                **   - black objects got in a write barrier;
+                **   - all kinds of weak tables during propagation phase;
+                **   - all threads.
+                ** 'weak': tables with weak values to be cleared;
+                ** 'ephemeron': ephemeron tables with white->white entries;
+                ** 'allweak': tables with weak keys and/or weak values to be cleared.
+                **
+                ** The exceptions to that "gray rule" are:
+                ** - TOUCHED2 objects in generational mode stay in a gray list (because
+                ** they must be visited again at the end of the cycle), but they are
+                ** marked black because assignments to them must activate barriers (to
+                ** move them back to TOUCHED1).
+                ** - Open upvales are kept gray to avoid barriers, but they stay out
+                ** of gray lists. (They don't even have a 'gclist' field.)
+                */
+
+1. 所有的对象在free前都能被找到，必定处于一下某一个list中，使用GCObject::CommonHeader的next域来链接起来：  
+        all_gc: 所有未被标记finalization的对象  
+        finobj: 所有被标记了finalization的对象  
+        tobefnz: 所有准备好呗finalized的对象  
+        fixedgc: 所有不会被回收的对象  
+
+2. 对于分代回收(Generational Collector) ....
+3. 有另外的一组lists用于管理gray对象，这些lists使用gclist来链接起来，任何gray对象必定属于其中一个list，且属于这些list的对象必定都是gray的。  
+        gray: 常规的gray list，等待下一次扫描标记  
+        grayagain: 必须在atomic阶段扫描的list，包含了： 1. black对象通过barrier back到gray的； 2. 在propagation阶段处理的weak table； 3. 所有的thread对象。  
+        weak: 有weak value待清理的table  
+        ephemeron: ephemeron tables with white->white entries  
+        allweak: 有weak key或weak value待清理的table  
+        例外情况： 1. TOUCHED2 对象在分代回收模式下始终保持在gray list...; 2. Open Upvalues始终保持gray状态避免barriers，但是他们不在gray lists中（甚至都没有gclist域）  
 
 ## lgc.c
 
@@ -88,7 +175,22 @@ https://blog.codingnow.com/2011/03/lua_gc_1.html
 |runafewfinalizers|调用指定个数的GCTM|lua_State *L, int n|循环n，判断g->tobefnz，run GCTM|
 |callallpendingfinalizers|调用全部个数的GCTM|lua_State *L|循环run GCTM，直到g->tobefnz为空|
 |findlast|定位到gc列表最后一个对象|GCObject **p||
-|separatetobefnz|Move all unreachable objects (or 'all' objects) that need finalization from list 'finobj' to list 'tobefnz' (to be finalized).|global_State *g, ||
+|separatetobefnz|Move all unreachable objects (or 'all' objects) that need finalization from list 'finobj' to list 'tobefnz' (to be finalized).|global_State *g, |g->finobj： list of collectable objects with finalizers<br>g->finobjsur: list of survival objects with finalizers<br>g->finobjold1: list of old1 objects with finalizers<br>g->finobjrold: list of really old objects with finalizers|
+|checkpointer|If pointer 'p' points to 'o', move it to the next element.|GCObject **p, GCObject *o|if (o == *p) *p = o->next;|
+|correctpointers||global_State *g, GCObject *o|checkpointer(&g->survival, o); checkpointer(&g->old1, o); checkpointer(&g->reallyold, o); checkpointer(&g->firstold1, o);<br>g->survival: start of objects that survived one GC cycle<br>g->old1: start of old1 objects<br>g->reallyold: objects more than one cycle old (really old)<br>g->firstold1: first old1 object in the list|
+|TODO：分代回收相关||||
+|setpause|Set the "time" to wait before starting a new GC cycle; cycle will start when memory use hits the threshold of|global_State *g||
+|entersweep|开始清理|lua_State *L|设置g->gcstat=GCSswpallgc，调用一次sweeptolive|
+|deletelist|delete all objects in list 'p' until(not include) object 'limit'|lua_State *L, GCObject *p, GCObject *limit||
+|luaC_freeallobjects|Call all finalizers of the objects in the given Lua state, and then free all objects, except for the main thread.|lua_State *L||
+|atomic|原子的做一遍扫描标记，处理所有剩下的gray objects(objects in grayagain list)|lua_State *L||
+|sweepstep|分步清理|lua_State *L, global_State *g, int nextstate, GCObject **nextlist|g->sweepgc sweeplist; else enter next state|
+|singlestep|step between GC states|lua_State *L||
+|luaC_runtilstate|looping singlestep until 'statesmask'|lua_State *L, int statesmask||
+|incstep|looping singlestep until negative debt|lua_State *L, global_State *g||
+|luaC_step|performs a basic GC step if collector is running|lua_State *L|simply call incstep|
+|fullinc|Perform a full collection in incremental mode.|lua_State *L, global_State *g||
+|luaC_fullgc|Performs a full GC cycle.|lua_State *L, int isemergency|if 'isemergency', set a flag to avoid some operations which could change the interpreter state in some unexpected ways (running finalizers and shrinking some structures)|
 ---
 
 <br>
